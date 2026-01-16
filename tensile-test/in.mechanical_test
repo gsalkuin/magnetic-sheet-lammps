@@ -1,0 +1,220 @@
+# =============================================================================
+#                    MAGNETIC KIRIGAMI SHEET SIMULATION
+#                         Tensile Test with Gravity
+# =============================================================================
+# Created by Teng Zhang
+# Date: 05/09/2025
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#                           INITIALIZATION
+# -----------------------------------------------------------------------------
+
+units           lj
+atom_style      hybrid sphere dipole molecular
+dimension       3
+boundary        p p p
+processors      * * 1
+
+
+# -----------------------------------------------------------------------------
+#                           ATOM DEFINITION
+# -----------------------------------------------------------------------------
+
+bond_style      harmonic
+dihedral_style  harmonic
+angle_style     dipole
+
+read_data       kirigami_magnetic_sheet_d11_t025_m03_E15_r40_a90_Br106mT.lam
+
+
+# -----------------------------------------------------------------------------
+#                           FORCE FIELDS
+# -----------------------------------------------------------------------------
+
+atom_modify     sort 1 2.7
+comm_modify     mode single cutoff 2.7 vel yes
+
+improper_style  triangle/center
+improper_coeff  1 150.0 0.0
+
+pair_style      hybrid granular lj/cut/dipole/cut 0.1 2.7
+pair_coeff      1 1 granular dmt 1.85e3 10 0.49 0.01 tangential mindlin_rescale NULL 1.0 1 damping mass_velocity
+pair_coeff      2 2 lj/cut/dipole/cut 0.0 0.1
+pair_coeff      1 2 lj/cut/dipole/cut 0.0 0.1
+
+special_bonds   lj/coul 0.0 0.0 0.0
+
+neigh_modify    exclude type 1 2
+neigh_modify    exclude type 1 1
+# Turn off magnetic interaction (uncomment to disable)
+# neigh_modify  exclude type 2 2
+
+
+# -----------------------------------------------------------------------------
+#                           COMPUTES
+# -----------------------------------------------------------------------------
+
+compute         patompe all pe/atom
+compute         molPE   all pe bond angle dihedral improper
+compute         bonPE   all pe bond
+compute         angPE   all pe angle
+compute         dihPE   all pe dihedral
+compute         impPE   all pe improper
+compute         pairPE  all pe pair
+
+compute         xyzcoor all property/atom x y z
+compute         xmax    all reduce max c_xyzcoor[1]
+compute         xmin    all reduce min c_xyzcoor[1]
+compute         ymax    all reduce max c_xyzcoor[2]
+compute         ymin    all reduce min c_xyzcoor[2]
+
+
+# -----------------------------------------------------------------------------
+#                           GROUPS & REGIONS
+# -----------------------------------------------------------------------------
+
+# Boundary regions
+region          left    block INF -16.0    INF INF INF INF
+region          right   block 16.0 INF     INF INF INF INF
+
+# Reference point regions
+region          RP1     block  13.399  13.4001 INF INF INF INF
+region          RP2     block   7.799   7.8001 INF INF INF INF
+region          RP3     block   2.199   2.2001 INF INF INF INF
+region          RP4     block  -3.4001 -3.399  INF INF INF INF
+region          RP5     block  -9.001  -8.999  INF INF INF INF
+
+# Atom type groups
+group           elastic   type 1
+group           magnetic  type 2
+
+# Spatial groups
+group           left      region left
+group           right     region right
+group           gp1       region RP1
+group           gp2       region RP2
+group           gp3       region RP3
+group           gp4       region RP4
+group           gp5       region RP5
+group           popdown   union gp1 gp2 gp3 gp4 gp5
+
+
+# -----------------------------------------------------------------------------
+#                           INITIAL PARAMETERS
+# -----------------------------------------------------------------------------
+
+variable        L0 equal 38.0
+print           "Initial Length, L0: ${L0}"
+
+
+# =============================================================================
+#                           PHASE 1: RELAXATION
+# =============================================================================
+
+timestep        0.0005
+
+# Zero initial velocities at boundaries
+velocity        left  set 0.0 0.0 0.0 sum no units box
+velocity        right set 0.0 0.0 0.0 sum no units box
+
+# Integration and thermostat
+fix             1 all nve/sphere update dipole
+fix             2 all langevin 0.00001 0.00001 1.0 699483
+
+# Damping and external forces
+fix             3 magnetic viscous/sphere 0.0001
+fix             4 elastic gravity -9.8e-3 vector 1 0 0
+
+# Boundary constraints
+fix             5 left  setforce 0.0 0.0 0.0
+fix             6 right setforce 0.0 0.0 0.0
+fix             7 all   balance 1000 1.1 shift x 10 1.1
+
+fix_modify      4 energy yes
+
+# Output variables
+variable        LLy      equal "c_ymax - c_ymin"
+variable        LLx      equal "c_xmax - c_xmin"
+variable        strain   equal "(v_LLx - v_L0)/v_L0"
+variable        myenergy atom "c_patompe"
+
+# Trajectory output
+dump            1 all custom 100000 ./fxyz/test_magnetic_relax_*.xyz &
+                type x y z v_myenergy mux muy muz id
+fix             extra1 all ave/time 1 1000 100000 f_5[1] f_6[1] c_pairPE &
+                file ./txt/relax_data.txt
+
+# Thermodynamic output
+thermo          1000
+thermo_style    custom step v_strain temp ke pe press c_pairPE c_bonPE c_angPE c_dihPE c_impPE
+thermo_modify   lost ignore flush yes
+
+run             200000
+
+# Cleanup
+unfix           1
+unfix           2
+unfix           3
+unfix           4
+unfix           5
+unfix           6
+unfix           7
+unfix           extra1
+undump          1
+
+
+# =============================================================================
+#                           PHASE 2: TENSILE DEFORMATION
+# =============================================================================
+
+reset_timestep  0
+timestep        0.0005
+
+# Apply tensile velocity to boundaries
+velocity        left  set -0.0005 0.0 0.0 sum no units box
+velocity        right set  0.0005 0.0 0.0 sum no units box
+
+# Integration and thermostat
+fix             1 all nve/sphere update dipole
+fix             2 all langevin 0.00001 0.00001 0.5 699483
+
+# Damping and external forces
+fix             3 magnetic viscous/sphere 0.0001
+fix             4 elastic gravity -9.8e-3 vector 1 0 0
+
+# Boundary constraints
+fix             5 left  setforce 0.0 0.0 0.0
+fix             6 right setforce 0.0 0.0 0.0
+fix             7 all   balance 1000 1.1 shift x 10 1.1
+
+fix_modify      4 energy yes
+
+# Output variables
+variable        LLy      equal "c_ymax - c_ymin"
+variable        LLx      equal "c_xmax - c_xmin"
+variable        strain   equal "(v_LLx - v_L0)/v_L0"
+variable        myenergy atom "c_patompe"
+
+# Trajectory output
+dump            1 all custom 50000 ./fxyz/test_magnetic_tensile_*.xyz &
+                type x y z v_myenergy mux muy muz id
+fix             extra1 all ave/time 1 1000 50000 f_5[1] f_6[1] c_pairPE &
+                file ./txt/pulling_data.txt
+
+# Thermodynamic output
+thermo          1000
+thermo_style    custom step v_strain temp ke pe press c_pairPE c_bonPE c_angPE c_dihPE c_impPE
+thermo_modify   lost ignore flush yes
+
+run             40000000
+
+# Cleanup
+unfix           1
+unfix           2
+
+
+# =============================================================================
+#                           END OF SIMULATION
+# =============================================================================
